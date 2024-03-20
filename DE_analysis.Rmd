@@ -1,0 +1,567 @@
+---
+title: "Differential expression analysis of adult and late third instar larval testes from Drosophila melanogaster males and translocationsT(1;2) males."
+author: "Analysis done by Yuejun Wang, TriLab Biounformatic Group"
+output:
+  html_document:
+  pdf_document: default
+  df_print: paged
+gemoetry: margin=1in
+fontsize: 8pt
+fontfamily: mathpazo
+---
+
+\center
+
+# *Summary:*
+In order to study the effect of translocation T(1;2) on gene expression in testes, we performed polyA+ RNA-seq profiles from pools of adult and third instar larval testes from 7 translocation lines in biological quadruplicate. Among the 7 translocations, 5 are male sterile, 2 are fertile. In order to compare the expression profiles of translocations to the control, we sequence the testes from the parental flies that were irradiated to generate the translocation lines. We prepared 50bp stranded single end read libraries.
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, tidy = TRUE)
+```
+
+# Load libraries
+```{r message=FALSE}
+
+options(java.parameters = "-Xmx8000m")
+
+library(tidyverse)
+library(DESeq2)
+library(cowplot)
+library(ggpubr)
+library(RColorBrewer)
+library(pheatmap)
+library(ggsci)
+library(AnnotationDbi)
+library(scales)
+library(org.Dm.eg.db)
+library(xlsx)
+library(r2excel)
+library(ggplot2)
+library(viridis)
+library(RSkittleBrewer)
+library(genefilter)
+library(corrplot)
+library(reshape2)
+library(ComplexHeatmap)
+library(circlize)
+library(UpSetR)
+trop = RSkittleBrewer('tropical')
+```
+
+# Load aux functions
+```{r}
+source(file = "01_aux_rnaseq_functions.R")
+```
+
+# Load data
+```{r}
+metadata <- as.data.frame(read_tsv(file = "SampleInfo.txt", col_names = TRUE, comment = "#"))
+rownames(metadata) <- metadata$Sample
+
+
+read_counts <- as.data.frame(read_tsv(file = "/gpfs/gsfs12/users/wangy80/TK105/results/05counts/read_counts", col_names = TRUE, comment = "#"))
+rownames(read_counts) <- read_counts$Geneid # adding gene ids as row names
+
+
+# Rename sample names
+read_counts <- read_counts[,7:length(read_counts)]
+
+colnames(read_counts) <- gsub(".sorted.dedup.bam","",
+                              gsub("results/04dedup/","",
+                                   colnames(read_counts)))
+
+
+# Sort tables so metadata and read counts match order
+read_counts <- read_counts[,match(metadata$SampleID, colnames(read_counts))]
+all(metadata$SampleID == colnames(read_counts))
+
+
+# Round read counts to the closest interger
+read_counts <- round(read_counts, digits = 0)
+
+# include total read counts in metadata
+metadata$read_counts <- colSums(read_counts)
+
+# Rename column names in read_counts based on metadata
+colnames(read_counts) <- rownames(metadata)
+
+write.table(x = metadata, file = "metadata.txt", sep = "\t") 
+```
+
+# DE analysis with DESeq2
+
+```{r}
+dir.create(path = "./Plots", showWarnings = FALSE)
+
+# Converting Time, DMSO and Replicate number to factors
+metadata$Age <- as.factor(metadata$Age)
+metadata$Condition <- relevel(as.factor(metadata$Condition),"Control",)
+metadata$Replicate <- as.factor(metadata$Replicate)
+
+# Adding read_depth in design to control for read_depth
+dds <- DESeqDataSetFromMatrix(countData = read_counts, 
+                              colData = metadata,  
+                              design = ~ Age + Condition + Age:Condition)
+
+
+# Plot total reads per sample using barchar
+p <- ggbarplot(data = metadata, 
+          x = "Sample", 
+          y = "read_counts",
+          x.text.angle = 90,
+          fill = "Condition", 
+          title = "Total read counts per sample", 
+          ylab = "Read counts",
+          sort.by.groups = TRUE,
+          palette = "jco",
+          sort.val = "asc")
+
+ggsave2("Plots/barplot_read_counts_per_sample.pdf", plot = p,width=14,height=8)
+
+# Normalize counts
+vsd <- vst(dds, blind=FALSE)
+
+# Keep genes with at least 20 reads total across samples
+#keep <- rowSums(as.data.frame(dds@assays@data@listData)) >= 20
+
+keep <- rowSums(counts(dds) >= 10) >= 3
+vsd <- vsd[keep,]
+
+# Calculate distances between samples
+sampleDists <- dist(t(assay(vsd)))
+
+# Plot inter-sample distances
+old.par <- par(no.readonly=T)
+
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Sample)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+p.hm <- pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         color = colorRampPalette(c("red", "white", "blue"))(100))
+
+pdf("./Plots/heat_map.pdf", p.hm,width=16,height=12)
+p.hm
+dev.off()
+
+p.hm
+
+# PCA
+pcaData <- plotPCA(vsd, intgroup=c("Condition","Age"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+y.coords = c(min(pcaData$PC1, pcaData$PC2), max(pcaData$PC1, pcaData$PC2))
+x.coords = y.coords
+p1 <- ggplot(pcaData, aes(PC1, PC2, color=Condition, shape=Age)) +
+  geom_point() + scale_color_lancet() + 
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) 
+
+ggsave("Plots/pca.pdf", plot = p1)
+p1
+
+```
+
+Samples clustered mainly by Age.
+
+## pearson correlation
+
+```{r}
+df <- as.data.frame(assay(vsd))
+write.table(df,"DESeq2_normalized.txt",sep="\t",quote=F)
+correlation <- cor(df)
+
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(cormat){
+  cormat[lower.tri(cormat)]<- NA
+  return(cormat)
+}
+
+
+reorder_cormat <- function(cormat){
+  # Use correlation between variables as distance
+  dd <- as.dist((1-cormat)/2)
+  hc <- hclust(dd)
+  cormat <-cormat[hc$order, hc$order]
+}
+
+# Reorder the correlation matrix
+cormat <- reorder_cormat(correlation)
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Create a ggheatmap
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0.75, limit = c(0.5,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, 
+                                   size = 12, hjust = 1))+
+  coord_fixed()
+# Print the heatmap
+print(ggheatmap)
+
+
+pdf("./Plots/DESeq2_sample_pearson_correlation.pdf",height=14,width=15)
+ggheatmap
+dev.off()
+```
+
+# filter outliners
+
+```{r}
+
+dds.f <- dds[,dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep3" & dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep2" & dds$Sample != "Adult_Testes_BM6_Sterile_translocation_rep3"] 
+
+#design(dds.f) <- ~ group
+dds.f <- DESeq(dds.f)
+resultsNames(dds.f)
+
+```
+
+
+# Perform PCA analysis
+
+```{r}
+# Normalize counts
+vsd.f <- vst(dds.f, blind=FALSE)
+
+# Keep genes with at least 20 reads total across samples
+keep <- rowSums(counts(dds.f) >= 10) >= 3
+vsd.f <- vsd.f[keep,]
+
+# PCA
+pcaData <- plotPCA(vsd.f, intgroup=c("Condition","Age"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+y.coords = c(min(pcaData$PC1, pcaData$PC2), max(pcaData$PC1, pcaData$PC2))
+x.coords = y.coords
+p1 <- ggplot(pcaData, aes(PC1, PC2, color=Condition, shape=Age)) +
+  geom_point() + scale_color_lancet() + 
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) 
+
+ggsave("Plots/pca2.pdf", plot = p1)
+p1
+```
+
+
+# Run DE analysis
+```{r}
+
+dir.create(path = "./DE", showWarnings = FALSE)
+
+comparisons <- list(
+c("Condition_BM1_Sterile_vs_Control"),
+c("Condition_BM21_Fertile_vs_Control"),
+c("Condition_BM24_Sterile_vs_Control"),
+c("Condition_BM4_Fertile_vs_Control"),
+c("Condition_BM46_Sterile_vs_Control"),
+c("Condition_BM5_Sterile_vs_Control"),
+c("Condition_BM6_Sterile_vs_Control"),
+c("Condition_BM1_Sterile_vs_Control","AgeL3.ConditionBM1_Sterile"),
+c("Condition_BM21_Fertile_vs_Control","AgeL3.ConditionBM21_Fertile"),
+c("Condition_BM24_Sterile_vs_Control","AgeL3.ConditionBM24_Sterile"),
+c("Condition_BM4_Fertile_vs_Control","AgeL3.ConditionBM4_Fertile"),
+c("Condition_BM46_Sterile_vs_Control","AgeL3.ConditionBM46_Sterile"),
+c("Condition_BM5_Sterile_vs_Control","AgeL3.ConditionBM5_Sterile"),
+c("Condition_BM6_Sterile_vs_Control","AgeL3.ConditionBM6_Sterile")
+)
+
+
+########################################################################################################
+# Make function here to compute DE analysis and output results for each comparison above.
+########################################################################################################
+# Define function for processing and saving result tables
+sort_and_write_res_table <- function(result_table, 
+                                     file_name = "TABLE.xlsx", 
+                                     sheet_name = "sheet_1"){
+  dir.create(path = "./DE", showWarnings = FALSE)
+  
+  # add path
+  file_name <- paste0("./DE/",file_name)
+  
+  # Check if an excel spreadsheet already exists, otherwise create one
+  if(file.exists(file_name)){
+    wb <- loadWorkbook(file = file_name)
+  } else {
+    wb <- createWorkbook(type="xlsx")
+  }
+  
+  # # Create new excel sheet, remove sheets if it already exits (if the sheet name is too long, the errors might occur)
+  sheets <- getSheets(wb)
+  if(is.element(sheet_name,names(sheets))){
+    removeSheet(wb, sheetName=sheet_name)
+  }
+  sheet <- createSheet(wb, sheetName = sheet_name)
+
+  # Sort genes by (padj)
+  result_table_sorted <- result_table[order(result_table$padj, decreasing = FALSE),]
+  
+  # Add gene symbols
+  symbol_list <- replace_gene_acc_by_symbol_ids(rownames(result_table_sorted), return_all = TRUE, db = org.Dm.eg.db)
+  result_table_sorted$Gene_name <- symbol_list
+  result_table_sorted <- as.data.frame(result_table_sorted) 
+  
+  # Add df to excel sheet
+  xlsx.addTable(wb = wb, sheet = sheet, data = result_table_sorted, startRow = 1, startCol = 1)
+
+  # Write sorted table to Excel file as different worksheets. Need file name + Worksheet name !!!
+  saveWorkbook(wb, file_name)
+  
+  # Write sorted table to file
+  # write.table(as.data.frame(result_table_sorted), file = paste0("./DE/",file_name,".txt"), sep = "\t", col.names=NA)
+  
+  return(result_table_sorted)
+}
+
+
+get_deseq_result <- function(dds, contrast, analysis_type = "ashr"){
+  #print(1)
+  if(analysis_type %in% c("ashr","apeglm","normal")){
+    res <- lfcShrink(dds = dds, contrast =list(contrast), type = analysis_type)
+  } else if (analysis_type == "result"){
+    res <- results(object = dds, contrast = contrast, independentFiltering = FALSE)
+  }
+  #print(2)
+  # Replace NAs by 1s
+  res$pvalue[is.na(res$pvalue)] <- 1
+  res$padj[is.na(res$padj)] <- 1
+  #print(3)
+  # Print out summary of results
+  print(contrast)
+  summary(res, alpha = 0.05)
+  #print(4)
+  # Sort result table and save it
+  my_file_name = paste0("DE_",dds$dds_ID[1])
+  #paste0("DE_",paste0(contrast, collapse = "_"),"_",dds$dds_ID[1])
+  
+  my_sheet = paste0(paste0(contrast, collapse = "_"))
+  my_sheet = gsub("Condition_","C_",my_sheet)
+  my_sheet = gsub("Sterile","S",my_sheet)
+  my_sheet = gsub("Fertile","F",my_sheet)
+  #print(5)
+  res_sorted <- sort_and_write_res_table(result_table = res, 
+                                         file_name =  paste0(my_file_name,".xlsx"), 
+                                         sheet_name = my_sheet)
+  #print(6)
+  return(res_sorted)
+  
+}
+```
+
+```{r}
+# Using lfcShrink instead of results to reduce high Log2FC bias of genes with low expression
+
+DE_results = list()
+for (i in comparisons){
+  print(i)
+  id <- paste0(i, collapse = "_")
+  DE_results[[id]] <- get_deseq_result(dds = dds.f, contrast = i, analysis_type = "ashr" )
+
+  genes_of_interest <- head(rownames(DE_results[[id]][DE_results[[id]]$padj <= 0.05, ]))
+  if (length(genes_of_interest) > 0){
+    plot_normalized_gene_expression(my_dds = dds.f, 
+                                  ensmbl_gene_list = genes_of_interest, 
+                                  file_prefix = paste0("Gene_exp_",id)) 
+  }
+}  
+
+```
+
+# genelists overlap
+
+```{r}
+my_overlap_list <- list()
+for (i in names(DE_results)){
+    DE <- c(rownames(subset(DE_results[[i]], padj <= 0.05)))
+    my_overlap_list[[i]] <- DE
+}
+
+
+m1 = make_comb_mat(my_overlap_list)
+p1 <- UpSet(m1,top_annotation = upset_top_annotation(m1, add_numbers = TRUE),
+    right_annotation = upset_right_annotation(m1, add_numbers = TRUE))
+
+pdf("./Plots/overlap_DEs.pdf",height=5,width=20)
+p1
+dev.off()
+```
+
+
+
+# Build summary table across contrats
+```{r}
+N <- length(names(DE_results))
+# Initialize table
+my_table <- data.frame(rbind("logFC.up" = rep(0, N), 
+                             "logFC.down" = rep(0, N)
+                             )
+                       ) 
+colnames(my_table) <- names(DE_results)
+
+for (i in names(DE_results)){ 
+  my_table["logFC.up",i] <- table(DE_results[[i]]$padj <= 0.05 & DE_results[[i]]$log2FoldChange > 0)[2]
+  my_table["logFC.down",i] <- table(DE_results[[i]]$padj <= 0.05 & DE_results[[i]]$log2FoldChange < 0)[2]
+}
+
+# Replace NA by 0s
+my_table[is.na(my_table )] <- 0
+write.table(x = my_table, file = "DE_summary.txt", sep = "\t", col.names = NA)
+
+```
+
+
+# Look for DE gene overlaps among time points and direction of change in gene expression
+# Build summary table across contrats
+```{r}
+
+get_diff_exp_genes_across_conditions_plot <- function(DE_result_list){
+  # Initialize list 
+  my_overlap_list <- list()
+  all_sig_genes <- c()
+  
+  for (i in names(DE_result_list)){
+    genes_up <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange > 0.5)))
+    genes_dn <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange < -0.5)))
+    #my_overlap_list.f[i] <- c(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange > 0)[,"Gene_name"])
+    my_overlap_list[[i]] <- unique(c(genes_up, genes_dn) )
+    #                          subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange < 0)[,"Gene_name"]
+    #                          )
+    all_sig_genes <- unique(c(all_sig_genes, my_overlap_list[[i]]))
+    #my_table_overlap["logFC.up.male",i] <- subset(DE_results.m[[i]], padj <= 0.05 & log2FoldChange > 0)[,"Gene_name"]
+    #my_table_overlap["logFC.down.male",i] <- subset(DE_results.m[[i]], padj <= 0.05 & log2FoldChange < 0)[,"Gene_name"]
+  }
+  
+  row.N <- length(all_sig_genes)
+  col.N <- length(names(DE_result_list))
+  my_tibble <- as_tibble(matrix(nrow = row.N, ncol = col.N + 2))
+  colnames(my_tibble) <- c("gene_ids","gene_names", names(DE_result_list))
+  my_tibble$gene_ids <- all_sig_genes
+  my_tibble$gene_names <- subset(DE_result_list[[i]], rownames(DE_result_list[[i]]) %in%  all_sig_genes)["Gene_name"]
+  
+  # Load tibble (1 => is differentially expressed in contrast X; 0 => is NOT differentially expressed in contrast X)
+  for (my_row in 1:row.N){
+    for (my_col in 1:col.N){
+      my_query <- my_tibble$gene_ids[my_row]
+      my_contrast <- colnames(my_tibble)[my_col]
+      my_tibble[my_row, my_col + 2] <- ifelse(test = my_query %in% my_overlap_list[[my_contrast]], 
+                                          yes = subset(DE_result_list[[my_contrast]], rownames(DE_result_list[[my_contrast]]) == my_query)["log2FoldChange"], 
+                                          no = 0)
+    }
+  }
+  
+  my_tibble_long <- pivot_longer(my_tibble, cols = 3:ncol(my_tibble), names_to = "contrast", values_to = "log2fc")
+  my_tibble_long$log2fc[my_tibble_long$log2fc < -5] <- -5
+  my_tibble_long$log2fc[my_tibble_long$log2fc >  5] <-  5
+  
+  # Plot table
+  p <- my_tibble_long %>% ggplot(aes(x = gene_names$Gene_name, y = contrast, colour = "white", fill = log2fc)) + 
+    theme_pubclean() + 
+    geom_tile( ) +
+    scale_fill_gradient2(low = "red", high = "green", midpoint = 0, mid = "white") + 
+    coord_fixed() + 
+    theme(axis.ticks = element_blank(),
+          panel.grid.minor.x = element_blank(),panel.grid.minor.y = element_blank(),
+          panel.grid.major.x = element_blank(),panel.grid.major.y = element_blank(),
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+    xlab("Differentially expressed genes") + 
+    ylab("Contrasts") + 
+    labs(title = "Log2FC of genes differentially expressed across experimental conditions", 
+         subtitle = "( | Log2FC | > 0.5 and adj.p < 0.05 )")
+
+    return(p)
+}
+
+lists <- DE_results
+
+p <- get_diff_exp_genes_across_conditions_plot(DE_result_list = lists)
+ggsave(filename = "perturbed_genes.pdf", plot = p, path = "./Plots", width = 20, height = 10)
+p
+
+```
+
+## heatmap for all comparisons on all significant genes detected in at least one comparisons
+
+```{r message=FALSE}
+
+heatmap_DE <- function(list=list,out=out) {
+  list<-lapply(list, function(x) 
+  cbind(x, gene_ids = rownames(x)))
+
+  filter <- function(df) {
+    df[df$padj<=0.05,]
+  }
+
+  # Apply the filter function to each data frame in the list
+  filtered <- lapply(list, filter)
+
+  # Merge the filtered data frames into a single data frame
+  all_sig_genes <- unique((bind_rows(filtered))$gene_ids)
+
+  # Merge data frames by gene_ids
+  merged_df <- bind_rows(list, .id = "comparisons")
+
+  filtered_df <- merged_df[merged_df$gene_ids %in% all_sig_genes, ]
+
+  filtered_df_wide <- pivot_wider(filtered_df[,c(1,3,8)],  names_from = "comparisons", values_from = "log2FoldChange")
+
+
+  # heatmap
+
+  mat <- as.data.frame(filtered_df_wide[,2:ncol(filtered_df_wide)])
+  rownames(mat) <- filtered_df_wide$gene_ids
+
+  mat[is.na(mat)] <- 0
+
+  p <- Heatmap(mat, 
+        name="log2FoldChange",
+        show_row_names = FALSE,
+        col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+        #column_names_gp = gpar(fontsize =8),
+        #heatmap_height = unit(12, "cm"), 
+        #heatmap_width = unit(12, "cm")
+        )
+
+  pdf(paste0("./Plots/pheatmap_",out,".pdf"),p,height=12,width=12)
+  plot(p)
+  dev.off()
+  return(mat)
+}
+
+mat <- heatmap_DE(list=lists,out="all_DE")
+
+```
+## Average silhouette width
+
+```{r}
+library(cluster)
+sil <- rep(0, 20)
+#repeat k-means for 1:20 and extract silhouette:
+for(i in 2:20){
+  k1to20 <- kmeans(as.matrix(mat), centers = i, nstart = 25, iter.max = 20)
+  ss <- silhouette(k1to20$cluster, dist(mat))
+  sil[i] <- mean(ss[, 3])
+}
+
+# Plot the  average silhouette width
+plot(1:20, sil, type = "b", pch = 19, xlab = "Number of clusters k", ylab="Average silhouette width")
+abline(v = which.max(sil), lty = 2)
+```
+
+### Clustering using K-means
+
+```{r}
+set.seed(20)
+kClust <- kmeans(mat, centers=2, nstart = 1000, iter.max = 20)
+kClusters <- kClust$cluster
+```
+
+
+```{r}
+sessionInfo()
+```

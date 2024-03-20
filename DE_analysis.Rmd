@@ -45,17 +45,20 @@ library(reshape2)
 library(ComplexHeatmap)
 library(circlize)
 library(UpSetR)
+library(zoo)
+library(karyoploteR)
+library(ggthemes)
 trop = RSkittleBrewer('tropical')
 ```
 
 # Load aux functions
 ```{r}
-source(file = "01_aux_rnaseq_functions.R")
+source(file = "../01_aux_rnaseq_functions.R")
 ```
 
 # Load data
 ```{r}
-metadata <- as.data.frame(read_tsv(file = "SampleInfo.txt", col_names = TRUE, comment = "#"))
+metadata <- as.data.frame(read_tsv(file = "../SampleInfo.txt", col_names = TRUE, comment = "#"))
 rownames(metadata) <- metadata$Sample
 
 
@@ -95,7 +98,7 @@ dir.create(path = "./Plots", showWarnings = FALSE)
 
 # Converting Time, DMSO and Replicate number to factors
 metadata$Age <- as.factor(metadata$Age)
-metadata$Condition <- relevel(as.factor(metadata$Condition),"Control",)
+metadata$Condition <- relevel(as.factor(metadata$Condition),"Control")
 metadata$Replicate <- as.factor(metadata$Replicate)
 
 # Adding read_depth in design to control for read_depth
@@ -117,7 +120,7 @@ p <- ggbarplot(data = metadata,
           sort.val = "asc")
 
 ggsave2("Plots/barplot_read_counts_per_sample.pdf", plot = p,width=14,height=8)
-
+p
 # Normalize counts
 vsd <- vst(dds, blind=FALSE)
 
@@ -166,87 +169,105 @@ p1
 
 Samples clustered mainly by Age.
 
-## pearson correlation
-
-```{r}
-df <- as.data.frame(assay(vsd))
-write.table(df,"DESeq2_normalized.txt",sep="\t",quote=F)
-correlation <- cor(df)
-
-# Get upper triangle of the correlation matrix
-get_upper_tri <- function(cormat){
-  cormat[lower.tri(cormat)]<- NA
-  return(cormat)
-}
-
-
-reorder_cormat <- function(cormat){
-  # Use correlation between variables as distance
-  dd <- as.dist((1-cormat)/2)
-  hc <- hclust(dd)
-  cormat <-cormat[hc$order, hc$order]
-}
-
-# Reorder the correlation matrix
-cormat <- reorder_cormat(correlation)
-upper_tri <- get_upper_tri(cormat)
-# Melt the correlation matrix
-melted_cormat <- melt(upper_tri, na.rm = TRUE)
-# Create a ggheatmap
-ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
-  geom_tile(color = "white")+
-  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
-                       midpoint = 0.75, limit = c(0.5,1), space = "Lab", 
-                       name="Pearson\nCorrelation") +
-  theme_minimal()+ # minimal theme
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, 
-                                   size = 12, hjust = 1))+
-  coord_fixed()
-# Print the heatmap
-print(ggheatmap)
-
-
-pdf("./Plots/DESeq2_sample_pearson_correlation.pdf",height=14,width=15)
-ggheatmap
-dev.off()
-```
-
 # filter outliners
 
 ```{r}
+dds.f <- dds[,dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep3" & dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep2" & dds$Sample != "Adult_Testes_BM6_Sterile_translocation_rep3"]
 
-dds.f <- dds[,dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep3" & dds$Sample != "Adult_Testes_BM24_Sterile_translocation_rep2" & dds$Sample != "Adult_Testes_BM6_Sterile_translocation_rep3"] 
+vsd.f <- vst(dds.f, blind=FALSE)
 
-#design(dds.f) <- ~ group
-dds.f <- DESeq(dds.f)
-resultsNames(dds.f)
+df <- as.data.frame(assay(vsd.f))
+write.table(df,"DESeq2_normalized.txt",sep="\t",quote=F)
+```
 
+# Separate L3 and Adult
+
+```{r}
+dds.Adult <- dds.f[, dds.f$Age == "Adult"]
+dds.Adult$Age <- droplevels(dds.Adult$Age)
+
+design(dds.Adult) <- ~ Condition
+
+dds.Adult <- DESeq(dds.Adult)
+dds.Adult$dds_ID = "Adult"
+resultsNames(dds.Adult)
+
+
+dds.L3 <- dds.f[, dds.f$Age == "L3"]
+dds.L3$Age <- droplevels(dds.L3$Age)
+
+design(dds.L3) <- ~ Condition
+
+dds.L3 <- DESeq(dds.L3)
+dds.L3$dds_ID = "L3"
+resultsNames(dds.L3)
 ```
 
 
-# Perform PCA analysis
+# Perform Age-specific PCA analysis
 
 ```{r}
+# Adult
 # Normalize counts
-vsd.f <- vst(dds.f, blind=FALSE)
+vsd.Adult <- vst(dds.Adult, blind=FALSE)
 
 # Keep genes with at least 20 reads total across samples
-keep <- rowSums(counts(dds.f) >= 10) >= 3
-vsd.f <- vsd.f[keep,]
+keep <- rowSums(counts(dds.Adult) >= 10) >= 3
+
+vsd.Adult <- vsd.Adult[keep,]
+
+# Calculate distances between samples
+sampleDists.Adult <- dist(t(assay(vsd.Adult)))
+
+# Define the number of colors you want
+colourCount = length(unique(vsd.Adult$Condition))
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
 
 # PCA
-pcaData <- plotPCA(vsd.f, intgroup=c("Condition","Age"), returnData=TRUE)
-percentVar <- round(100 * attr(pcaData, "percentVar"))
-y.coords = c(min(pcaData$PC1, pcaData$PC2), max(pcaData$PC1, pcaData$PC2))
+pcaData.Adult <- DESeq2::plotPCA(vsd.Adult, intgroup=c("Condition"), returnData=TRUE, ntop = 500)
+percentVar <- round(100 * attr(pcaData.Adult, "percentVar"))
+y.coords = c(min(pcaData.Adult$PC1, pcaData.Adult$PC2), max(pcaData.Adult$PC1, pcaData.Adult$PC2))
 x.coords = y.coords
-p1 <- ggplot(pcaData, aes(PC1, PC2, color=Condition, shape=Age)) +
-  geom_point() + scale_color_lancet() + 
+p1 <- ggplot(pcaData.Adult, aes(PC1, PC2, color=Condition)) +
+  geom_point(size=4) + 
+  scale_color_manual(values = getPalette(colourCount)) +
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
   ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
-  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) 
+  coord_fixed(ratio = (max(pcaData.Adult$PC1)-min(pcaData.Adult$PC1))/(max(pcaData.Adult$PC2)-min(pcaData.Adult$PC2))) + labs(title = "Adult")
 
-ggsave("Plots/pca2.pdf", plot = p1)
+ggsave("Plots/pca_by_Adult.pdf", plot = p1)
 p1
+
+## L3 ## 
+# Normalize counts
+vsd.L3 <- vst(dds.L3, blind=FALSE)
+
+# Keep genes with at least 20 reads total across samples
+keep <- rowSums(counts(dds.L3) >= 10) >= 3
+
+vsd.L3 <- vsd.L3[keep,]
+
+# Calculate distances between samples
+sampleDists.L3 <- dist(t(assay(vsd.L3)))
+
+# Define the number of colors you want
+colourCount = length(unique(vsd.L3$Condition))
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+
+# PCA
+pcaData.L3 <- DESeq2::plotPCA(vsd.L3, intgroup=c("Condition"), returnData=TRUE, ntop = 500)
+percentVar <- round(100 * attr(pcaData.L3, "percentVar"))
+y.coords = c(min(pcaData.L3$PC1, pcaData.L3$PC2), max(pcaData.L3$PC1, pcaData.L3$PC2))
+x.coords = y.coords
+p2 <- ggplot(pcaData.L3, aes(PC1, PC2, color=Condition)) +
+  geom_point(size=4) + 
+  scale_color_manual(values = getPalette(colourCount)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData.L3$PC1)-min(pcaData.L3$PC1))/(max(pcaData.L3$PC2)-min(pcaData.L3$PC2))) + labs(title = "L3")
+
+ggsave("Plots/pca_by_L3.pdf", plot = p2)
+p2
 ```
 
 
@@ -262,14 +283,7 @@ c("Condition_BM24_Sterile_vs_Control"),
 c("Condition_BM4_Fertile_vs_Control"),
 c("Condition_BM46_Sterile_vs_Control"),
 c("Condition_BM5_Sterile_vs_Control"),
-c("Condition_BM6_Sterile_vs_Control"),
-c("Condition_BM1_Sterile_vs_Control","AgeL3.ConditionBM1_Sterile"),
-c("Condition_BM21_Fertile_vs_Control","AgeL3.ConditionBM21_Fertile"),
-c("Condition_BM24_Sterile_vs_Control","AgeL3.ConditionBM24_Sterile"),
-c("Condition_BM4_Fertile_vs_Control","AgeL3.ConditionBM4_Fertile"),
-c("Condition_BM46_Sterile_vs_Control","AgeL3.ConditionBM46_Sterile"),
-c("Condition_BM5_Sterile_vs_Control","AgeL3.ConditionBM5_Sterile"),
-c("Condition_BM6_Sterile_vs_Control","AgeL3.ConditionBM6_Sterile")
+c("Condition_BM6_Sterile_vs_Control")
 )
 
 
@@ -340,7 +354,7 @@ get_deseq_result <- function(dds, contrast, analysis_type = "ashr"){
   my_file_name = paste0("DE_",dds$dds_ID[1])
   #paste0("DE_",paste0(contrast, collapse = "_"),"_",dds$dds_ID[1])
   
-  my_sheet = paste0(paste0(contrast, collapse = "_"))
+  my_sheet = paste0(paste0(contrast, collapse = "_"),"_",dds$dds_ID[1])
   my_sheet = gsub("Condition_","C_",my_sheet)
   my_sheet = gsub("Sterile","S",my_sheet)
   my_sheet = gsub("Fertile","F",my_sheet)
@@ -357,57 +371,53 @@ get_deseq_result <- function(dds, contrast, analysis_type = "ashr"){
 ```{r}
 # Using lfcShrink instead of results to reduce high Log2FC bias of genes with low expression
 
-DE_results = list()
-for (i in comparisons){
+DE_results.Adult = list()
+DE_results.L3 = list()
+for (i in 1:length(comparisons)){
   print(i)
-  id <- paste0(i, collapse = "_")
-  DE_results[[id]] <- get_deseq_result(dds = dds.f, contrast = i, analysis_type = "ashr" )
+  id <- paste0(comparisons[[i]], collapse = "_")
+  DE_results.Adult[[id]] <- get_deseq_result(dds = dds.Adult, contrast = comparisons[[i]], analysis_type = "ashr" )
+  DE_results.L3[[id]] <- get_deseq_result(dds = dds.L3, contrast = comparisons[[i]], analysis_type = "ashr" )
 
-  genes_of_interest <- head(rownames(DE_results[[id]][DE_results[[id]]$padj <= 0.05, ]))
-  if (length(genes_of_interest) > 0){
-    plot_normalized_gene_expression(my_dds = dds.f, 
-                                  ensmbl_gene_list = genes_of_interest, 
-                                  file_prefix = paste0("Gene_exp_",id)) 
+  genes_of_interest.Adult <- head(rownames(DE_results.Adult[[id]][DE_results.Adult[[id]]$padj <= 0.05, ]))
+  if (length(genes_of_interest.Adult) > 0){
+    plot_normalized_gene_expression(my_dds = dds.Adult, 
+                                  ensmbl_gene_list = genes_of_interest.Adult, 
+                                  file_prefix = paste0("Gene_exp_",id, "_Adult_")) 
+  }
+  genes_of_interest.L3 <- head(rownames(DE_results.L3[[id]][DE_results.L3[[id]]$padj <= 0.05, ]))
+  if (length(genes_of_interest.L3) > 0){
+    plot_normalized_gene_expression(my_dds = dds.L3, 
+                                  ensmbl_gene_list = genes_of_interest.L3, 
+                                  file_prefix = paste0("Gene_exp_",id, "_L3_")) 
   }
 }  
 
 ```
 
-# genelists overlap
-
-```{r}
-my_overlap_list <- list()
-for (i in names(DE_results)){
-    DE <- c(rownames(subset(DE_results[[i]], padj <= 0.05)))
-    my_overlap_list[[i]] <- DE
-}
-
-
-m1 = make_comb_mat(my_overlap_list)
-p1 <- UpSet(m1,top_annotation = upset_top_annotation(m1, add_numbers = TRUE),
-    right_annotation = upset_right_annotation(m1, add_numbers = TRUE))
-
-pdf("./Plots/overlap_DEs.pdf",height=5,width=20)
-p1
-dev.off()
-```
-
-
-
 # Build summary table across contrats
+
 ```{r}
-N <- length(names(DE_results))
+N <- length(names(DE_results.Adult))
 # Initialize table
-my_table <- data.frame(rbind("logFC.up" = rep(0, N), 
-                             "logFC.down" = rep(0, N)
+my_table <- data.frame(rbind("logFC.up.Adult" = rep(0, N), 
+                             "logFC.down.Adult" = rep(0, N),
+                             "logFC.up.L3" = rep(0, N), 
+                             "logFC.down.L3" = rep(0, N)
                              )
                        ) 
-colnames(my_table) <- names(DE_results)
+colnames(my_table) <- names(DE_results.Adult)
 
-for (i in names(DE_results)){ 
-  my_table["logFC.up",i] <- table(DE_results[[i]]$padj <= 0.05 & DE_results[[i]]$log2FoldChange > 0)[2]
-  my_table["logFC.down",i] <- table(DE_results[[i]]$padj <= 0.05 & DE_results[[i]]$log2FoldChange < 0)[2]
+for (i in names(DE_results.Adult)){ 
+  my_table["logFC.up.Adult",i] <- table(DE_results.Adult[[i]]$padj <= 0.05 & DE_results.Adult[[i]]$log2FoldChange > 0)[2]
+  my_table["logFC.down.Adult",i] <- table(DE_results.Adult[[i]]$padj <= 0.05 & DE_results.Adult[[i]]$log2FoldChange < 0)[2]
+  my_table["logFC.up.L3",i] <- table(DE_results.L3[[i]]$padj <= 0.05 & DE_results.L3[[i]]$log2FoldChange > 0)[2]
+  my_table["logFC.down.L3",i] <- table(DE_results.L3[[i]]$padj <= 0.05 & DE_results.L3[[i]]$log2FoldChange < 0)[2]
 }
+
+names(DE_results.Adult) <- paste0("Adult_",names(DE_results.Adult))
+names(DE_results.L3) <- paste0("L3_",names(DE_results.L3))
+
 
 # Replace NA by 0s
 my_table[is.na(my_table )] <- 0
@@ -422,17 +432,17 @@ write.table(x = my_table, file = "DE_summary.txt", sep = "\t", col.names = NA)
 
 get_diff_exp_genes_across_conditions_plot <- function(DE_result_list){
   # Initialize list 
-  my_overlap_list <- list()
+  my_overlap_list.f <- list()
   all_sig_genes <- c()
   
   for (i in names(DE_result_list)){
-    genes_up <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange > 0.5)))
-    genes_dn <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange < -0.5)))
+    genes_up.f <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange > 0.5)))
+    genes_dn.f <- c(rownames(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange < -0.5)))
     #my_overlap_list.f[i] <- c(subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange > 0)[,"Gene_name"])
-    my_overlap_list[[i]] <- unique(c(genes_up, genes_dn) )
+    my_overlap_list.f[[i]] <- unique(c(genes_up.f, genes_dn.f) )
     #                          subset(DE_result_list[[i]], padj <= 0.05 & log2FoldChange < 0)[,"Gene_name"]
     #                          )
-    all_sig_genes <- unique(c(all_sig_genes, my_overlap_list[[i]]))
+    all_sig_genes <- unique(c(all_sig_genes, my_overlap_list.f[[i]]))
     #my_table_overlap["logFC.up.male",i] <- subset(DE_results.m[[i]], padj <= 0.05 & log2FoldChange > 0)[,"Gene_name"]
     #my_table_overlap["logFC.down.male",i] <- subset(DE_results.m[[i]], padj <= 0.05 & log2FoldChange < 0)[,"Gene_name"]
   }
@@ -449,7 +459,7 @@ get_diff_exp_genes_across_conditions_plot <- function(DE_result_list){
     for (my_col in 1:col.N){
       my_query <- my_tibble$gene_ids[my_row]
       my_contrast <- colnames(my_tibble)[my_col]
-      my_tibble[my_row, my_col + 2] <- ifelse(test = my_query %in% my_overlap_list[[my_contrast]], 
+      my_tibble[my_row, my_col + 2] <- ifelse(test = my_query %in% my_overlap_list.f[[my_contrast]], 
                                           yes = subset(DE_result_list[[my_contrast]], rownames(DE_result_list[[my_contrast]]) == my_query)["log2FoldChange"], 
                                           no = 0)
     }
@@ -477,12 +487,19 @@ get_diff_exp_genes_across_conditions_plot <- function(DE_result_list){
     return(p)
 }
 
-lists <- DE_results
+lists <- c(DE_results.Adult,DE_results.L3)
 
 p <- get_diff_exp_genes_across_conditions_plot(DE_result_list = lists)
 ggsave(filename = "perturbed_genes.pdf", plot = p, path = "./Plots", width = 20, height = 10)
 p
 
+p.f <- get_diff_exp_genes_across_conditions_plot(DE_result_list = DE_results.Adult)
+ggsave(filename = "perturbed_genes_Adult.pdf", plot = p.f, path = "./Plots", width = 20, height = 10)
+p.f
+
+p.m <- get_diff_exp_genes_across_conditions_plot(DE_result_list = DE_results.L3)
+ggsave(filename = "perturbed_genes_L3.pdf", plot = p.m, path = "./Plots", width = 20, height = 10)
+p.m
 ```
 
 ## heatmap for all comparisons on all significant genes detected in at least one comparisons
@@ -494,7 +511,7 @@ heatmap_DE <- function(list=list,out=out) {
   cbind(x, gene_ids = rownames(x)))
 
   filter <- function(df) {
-    df[df$padj<=0.05,]
+    df[df$padj<=0.05 & abs(df$log2FoldChange)>0.5,]
   }
 
   # Apply the filter function to each data frame in the list
@@ -517,7 +534,9 @@ heatmap_DE <- function(list=list,out=out) {
   rownames(mat) <- filtered_df_wide$gene_ids
 
   mat[is.na(mat)] <- 0
-
+  write.table(mat,paste0(out,"_log2FC0.5_padj0.05.txt"),sep="\t",quote=F,row.names=T)
+  
+  
   p <- Heatmap(mat, 
         name="log2FoldChange",
         show_row_names = FALSE,
@@ -527,38 +546,173 @@ heatmap_DE <- function(list=list,out=out) {
         #heatmap_width = unit(12, "cm")
         )
 
-  pdf(paste0("./Plots/pheatmap_",out,".pdf"),p,height=12,width=12)
+  pdf(paste0("./Plots/pheatmap_",out,".pdf"),height=12,width=12)
   plot(p)
   dev.off()
   return(mat)
 }
 
-mat <- heatmap_DE(list=lists,out="all_DE")
+mat_Adult = heatmap_DE(list=DE_results.Adult,out="Adult_DE")
+mat_L3 = heatmap_DE(list=DE_results.L3,out="L3_DE")
+mat_all = heatmap_DE(list=lists,out="all_DE")
 
 ```
-## Average silhouette width
+
+## rank by log2FC
 
 ```{r}
-library(cluster)
-sil <- rep(0, 20)
-#repeat k-means for 1:20 and extract silhouette:
-for(i in 2:20){
-  k1to20 <- kmeans(as.matrix(mat), centers = i, nstart = 25, iter.max = 20)
-  ss <- silhouette(k1to20$cluster, dist(mat))
-  sil[i] <- mean(ss[, 3])
+
+annotation <- read.delim("/gpfs/gsfs12/users/wangy80/TK105/data/00ref/dmel-all-r6.46.gene.anno.txt",header=F,sep="\t")
+names(annotation) <- c("chr","start","end","strand","GeneID","Gene_name")
+annotation <- annotation[which(annotation$chr=="2L" | annotation$chr=="2R" | annotation$chr=="3L" | annotation$chr=="3R" | annotation$chr=="4" | annotation$chr=="X" | annotation$chr=="Y" | annotation$chr=="mitochondrion_genome"),]
+
+
+window_size <- 10
+ymin=-2
+ymax=2
+
+
+# window_size <- 20,30
+# ymin=-1
+# ymax=1
+
+for(i in names(lists)){
+  df <- as.data.frame(lists[i])
+  names(df) <- c("baseMean","log2FoldChange","lfcSE","pvalue","padj","Gene_name")
+  res <- inner_join(df,annotation,by="Gene_name")
+  
+  res$log2FoldChange <- ifelse(res$padj<0.05,res$log2FoldChange,0)
+  # Sort genes by location
+  sorted_genes <- res %>% arrange(chr, start)
+
+  # Define window size
+
+  # Calculate sliding window averages for each chromosome
+  sliding_window_averages <- sorted_genes %>%
+    group_by(chr) %>%
+    mutate(window_average = rollapply(log2FoldChange, window_size, mean, align = "left", fill = NA)) %>%
+    filter(!is.na(window_average))
+
+
+  pdf(paste0("./Plots/",i,"_line_kp_w",window_size,".pdf"),width = 20, height = 10)
+  kp <- plotKaryotype(genome="dm6", plot.type=1, main=i)
+  kpLines(kp, chr=paste0("chr",sliding_window_averages$chr), x=sliding_window_averages$start, y=sliding_window_averages$window_average,
+          col="#AA88FF", ymin=ymin, ymax=ymax, r0=0, r1=1)
+  kpAxis(kp, ymin=ymin, ymax=ymax, r0=0, r1=1, col="gray50", cex=1)
+  dev.off()
+            
 }
 
-# Plot the  average silhouette width
-plot(1:20, sil, type = "b", pch = 19, xlab = "Number of clusters k", ylab="Average silhouette width")
-abline(v = which.max(sil), lty = 2)
+```
+
+# combine all conditions
+
+```{r}
+
+# Initialize an empty data frame for the result
+merged_df <- data.frame()
+
+# Iterate over the list, merging each data frame and adding the source name
+for (name in names(DE_results.L3)) {
+  # Temporary data frame to modify and then bind
+  temp_df <- DE_results.L3[[name]]
+  temp_df$class <- name  # Create a new column with the name of the list
+  
+  # Bind this temp data frame to the merged_df
+  merged_df <- rbind(merged_df, temp_df)
+}
+
+res <- inner_join(merged_df,annotation,by="Gene_name")
+  
+res$log2FoldChange <- ifelse(res$padj<0.05,res$log2FoldChange,0)
+# Sort genes by location
+sorted_genes <- res %>% arrange(class,chr, start)
+
+# Define window size
+window_size <- 10
+
+# Calculate sliding window averages for each chromosome
+sliding_window_averages <- sorted_genes %>%
+  group_by(class,chr) %>%
+  mutate(window_average = rollapply(log2FoldChange, window_size, mean, align = "left", fill = NA)) %>%
+  filter(!is.na(window_average))
+
+#Plot the sliding window averages
+p <- ggplot(sliding_window_averages, aes(x = start, y = window_average,color=class)) +
+  facet_wrap(~chr,ncol=1) +
+  geom_line(alpha=1) +
+  labs(x = "Location", y = "Average Log2FoldChange", title = "Sliding Window log2FoldChange by Chromosome") +
+  scale_color_brewer(palette="Paired") + 
+  theme_few()
+
+ggsave(filename = paste0("L3_line_w",window_size,".pdf"), plot = p, path = "./Plots", width = 20, height = 10)
+  
+p
+```
+
+### Determining Optimal Clusters
+
+```{r}
+library(factoextra)
+library(NbClust)
+
+####https://www.r-bloggers.com/2020/05/how-to-determine-the-number-of-clusters-for-k-means-in-r/
+
+# Elbow method
+fviz_nbclust(mat_all, kmeans, method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2)+
+  labs(subtitle = "Elbow method")
+# Silhouette method
+fviz_nbclust(mat_all, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method")
+# Gap statistic
+# nboot = 50 to keep the function speedy. 
+# recommended value: nboot= 500 for your analysis.
+# Use verbose = FALSE to hide computing progression.
+# set.seed(123)
+# fviz_nbclust(mat_all, kmeans, nstart = 25,  method = "gap_stat", nboot = 500)+
+#   labs(subtitle = "Gap statistic method")
+
 ```
 
 ### Clustering using K-means
 
 ```{r}
 set.seed(20)
-kClust <- kmeans(mat, centers=2, nstart = 1000, iter.max = 20)
-kClusters <- kClust$cluster
+
+for(k in 2:5){
+  
+  HM <- Heatmap(mat_all, 
+      name="log2FoldChange",
+      show_row_names = FALSE,
+      km=k,
+      col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+      #column_names_gp = gpar(fontsize =8),
+      #heatmap_height = unit(12, "cm"), 
+      #heatmap_width = unit(12, "cm")
+      )
+
+  pdf(paste0("./Plots/pheatmap_","k",k,".pdf"),height=12,width=12)
+  plot(HM)
+  dev.off()
+  
+  ## get clusters
+  for (i in 1:length(row_order(HM))){
+	  if (i == 1) {
+		  clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
+		  out <- cbind(clu, paste("cluster", i, sep=""))
+		  colnames(out) <- c("GeneID", "Cluster")
+	  } else {
+		  clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
+		  clu <- cbind(clu, paste("cluster", i, sep=""))
+		  out <- rbind(out, clu)
+	  }
+  }
+  
+  write.table(out,paste0("kmeans_k",k,".txt"),sep="\t",quote=F,row.names=F)
+  
+}
+
 ```
 
 

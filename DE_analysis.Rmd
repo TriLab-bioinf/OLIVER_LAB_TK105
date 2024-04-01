@@ -178,6 +178,23 @@ vsd.f <- vst(dds.f, blind=FALSE)
 
 df <- as.data.frame(assay(vsd.f))
 write.table(df,"DESeq2_normalized.txt",sep="\t",quote=F)
+
+
+# PCA
+pcaData <- plotPCA(vsd.f, intgroup=c("Condition","Age"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+y.coords = c(min(pcaData$PC1, pcaData$PC2), max(pcaData$PC1, pcaData$PC2))
+x.coords = y.coords
+p1 <- ggplot(pcaData, aes(PC1, PC2, color=Condition, shape=Age)) +
+  geom_point() + scale_color_lancet() + 
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) 
+
+ggsave("Plots/pca.f.pdf", plot = p1)
+p1
+
+
 ```
 
 # Separate L3 and Adult
@@ -567,9 +584,9 @@ names(annotation) <- c("chr","start","end","strand","GeneID","Gene_name")
 annotation <- annotation[which(annotation$chr=="2L" | annotation$chr=="2R" | annotation$chr=="3L" | annotation$chr=="3R" | annotation$chr=="4" | annotation$chr=="X" | annotation$chr=="Y" | annotation$chr=="mitochondrion_genome"),]
 
 
-window_size <- 10
-ymin=-2
-ymax=2
+window_size <- 30
+ymin=-0.5
+ymax=0.5
 
 
 # window_size <- 20,30
@@ -599,6 +616,7 @@ for(i in names(lists)){
   kpLines(kp, chr=paste0("chr",sliding_window_averages$chr), x=sliding_window_averages$start, y=sliding_window_averages$window_average,
           col="#AA88FF", ymin=ymin, ymax=ymax, r0=0, r1=1)
   kpAxis(kp, ymin=ymin, ymax=ymax, r0=0, r1=1, col="gray50", cex=1)
+  kpAbline(kp, h=0.5, data.panel = 2, r0=0, r1=1, col="red")
   dev.off()
             
 }
@@ -629,6 +647,50 @@ res$log2FoldChange <- ifelse(res$padj<0.05,res$log2FoldChange,0)
 sorted_genes <- res %>% arrange(class,chr, start)
 
 # Define window size
+window_size <- 50
+
+# Calculate sliding window averages for each chromosome
+sliding_window_averages <- sorted_genes %>%
+  group_by(class,chr) %>%
+  mutate(window_average = rollapply(log2FoldChange, window_size, mean, align = "left", fill = NA)) %>%
+  filter(!is.na(window_average))
+
+#Plot the sliding window averages
+p <- ggplot(sliding_window_averages, aes(x = start, y = window_average,color=class)) +
+  facet_wrap(~chr,ncol=1) +
+  geom_line(alpha=1) +
+  labs(x = "Location", y = "Average Log2FoldChange", title = "Sliding Window log2FoldChange by Chromosome") +
+  scale_color_brewer(palette="Paired") + 
+  ylim(c(-0.5,0.5)) +
+  geom_hline(yintercept=0,color="#999999",linetype=2) +
+  theme_few()
+
+ggsave(filename = paste0("L3_line_w",window_size,".pdf"), plot = p, path = "./Plots", width = 20, height = 10)
+  
+p
+```
+```{r}
+
+# Initialize an empty data frame for the result
+merged_df <- data.frame()
+
+# Iterate over the list, merging each data frame and adding the source name
+for (name in names(DE_results.Adult)) {
+  # Temporary data frame to modify and then bind
+  temp_df <- DE_results.Adult[[name]]
+  temp_df$class <- name  # Create a new column with the name of the list
+  
+  # Bind this temp data frame to the merged_df
+  merged_df <- rbind(merged_df, temp_df)
+}
+
+res <- inner_join(merged_df,annotation,by="Gene_name")
+  
+res$log2FoldChange <- ifelse(res$padj<0.05,res$log2FoldChange,0)
+# Sort genes by location
+sorted_genes <- res %>% arrange(class,chr, start)
+
+# Define window size
 window_size <- 10
 
 # Calculate sliding window averages for each chromosome
@@ -643,12 +705,17 @@ p <- ggplot(sliding_window_averages, aes(x = start, y = window_average,color=cla
   geom_line(alpha=1) +
   labs(x = "Location", y = "Average Log2FoldChange", title = "Sliding Window log2FoldChange by Chromosome") +
   scale_color_brewer(palette="Paired") + 
+  ylim(c(-0.5,0.5)) +
+  geom_hline(yintercept=0,color="#999999",linetype=2) +
   theme_few()
 
-ggsave(filename = paste0("L3_line_w",window_size,".pdf"), plot = p, path = "./Plots", width = 20, height = 10)
+ggsave(filename = paste0("Adult_line_w",window_size,".pdf"), plot = p, path = "./Plots", width = 20, height = 10)
   
-p
+
 ```
+
+
+
 
 ### Determining Optimal Clusters
 
@@ -686,30 +753,39 @@ for(k in 2:5){
       name="log2FoldChange",
       show_row_names = FALSE,
       km=k,
-      col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
-      #column_names_gp = gpar(fontsize =8),
+      col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red")),
+      column_names_gp = gpar(fontsize =8)
       #heatmap_height = unit(12, "cm"), 
       #heatmap_width = unit(12, "cm")
       )
 
-  pdf(paste0("./Plots/pheatmap_","k",k,".pdf"),height=12,width=12)
+  pdf(paste0("./Plots/heatmap_","k",k,".pdf"),height=12,width=12)
   plot(HM)
   dev.off()
+#   out <- data.frame()
+#   ## get clusters
+#   for (i in 1:length(row_order(HM))){
+#     if (i == 1) {
+#       clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
+#       out <- cbind(clu, paste("cluster", i, sep=""))
+#       colnames(out) <- c("GeneID", "Cluster")
+#     } else {
+#       clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
+#       clu <- cbind(clu, paste("cluster", i, sep=""))
+#       out <- rbind(out, clu)
+#     }
+#   }
+#   
+  gene_cluster <- row_order(HM)
+
+  clu_df <- lapply(names(gene_cluster), function(i){
+  out <- data.frame(coordinates = rownames(mat_all[gene_cluster[[i]],]),
+                    Cluster = paste0("cluster", i), stringsAsFactors = FALSE)
+  return(out)
+}) %>%
+  do.call(rbind, .)
   
-  ## get clusters
-  for (i in 1:length(row_order(HM))){
-	  if (i == 1) {
-		  clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
-		  out <- cbind(clu, paste("cluster", i, sep=""))
-		  colnames(out) <- c("GeneID", "Cluster")
-	  } else {
-		  clu <- t(t(row.names(mat_all[row_order(HM)[[i]],])))
-		  clu <- cbind(clu, paste("cluster", i, sep=""))
-		  out <- rbind(out, clu)
-	  }
-  }
-  
-  write.table(out,paste0("kmeans_k",k,".txt"),sep="\t",quote=F,row.names=F)
+  write.table(clu_df,paste0("kmeans_k",k,".txt"),sep="\t",quote=F,row.names=F)
   
 }
 
